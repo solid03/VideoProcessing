@@ -1,4 +1,4 @@
-﻿#region Archive
+#region Archive
 Class Archive {
     [string]$Name
     [string]$FullName
@@ -12,6 +12,10 @@ Class Archive {
         $this.ParentDir = $this.ArchiveDir | Split-Path
     }
 
+    # Extract()
+    #
+    # Extract .rar files
+    # Requires 7zip
     [void] Extract() {
         $7z = "C:\Program Files\7-Zip\7z.exe"
         try {
@@ -55,6 +59,7 @@ Class Video {
 [string]$Title
 [string]$Genre
 [string]$Studio
+[string]$Actor
 [string]$Date
 
 Video([System.IO.FileInfo]$File) {
@@ -67,6 +72,7 @@ Video([System.IO.FileInfo]$File) {
     $this.Title = $foo.format.tags.title
     $this.Genre = $foo.format.tags.genre
     $this.Studio = $foo.format.tags.album
+    $this.Actor = $foo.format.tags.artist
     $this.Date = $foo.format.tags.date
 }
 Video([String]$Path) {
@@ -80,17 +86,21 @@ Video([String]$Path) {
     $this.Title = $foo.format.tags.title
     $this.Genre = $foo.format.tags.genre
     $this.Studio = $foo.format.tags.album
+    $this.Actor = $foo.format.tags.artist
     $this.Date = $foo.format.tags.date
 }
 
 [void] EncodeH265(){
     if (!(Test-Path .\encode)) {[void](mkdir encode)}
-    ffmpeg.exe -i $this.FullName -c:v hevc -preset veryslow ".\encode\$($this.name)" | Out-Host
+    ffmpeg -i $this.FullName -c:v hevc -preset veryslow ".\encode\$($this.name)" | Out-Host
     Remove-Item $this.FullName
     Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
 }
 
-#[string] ParseName() {
+# ParseName()
+#
+# Parse video information/metadata from file name
+#
 [Hashtable] ParseName() {
     $withEpisodeString = '(?<studio>\w+)\.(?<episode>\w{5})\.(?<title>.*)'
     $maybeDateString = '(?<studio>\w+)\.(?<date>(?<year>\d\d)\.(?<month>\d\d)\.(?<day>\d\d))?\.?(?<title>.*)'
@@ -102,18 +112,26 @@ Video([String]$Path) {
         
     return $Matches
 }
+
 [string] ToString() {
     return $this.FullName
 }
+
+# WriteMetadata()
+#
+# Write video metadata to object. Requires FFMPEG.
+# Todo: create check to prevent writing metadata even if nothing has changed
+
 [void] WriteMetadata() {
     if (!(Test-Path .\encode)) {[void](mkdir encode)}
     #$video = [Video]::new((Get-ChildItem $Path))
 
-    ffmpeg -hide_banner -i $this.FullName -metadata genre=$($this.Genre) -metadata title=$($this.Title) -metadata album=$($this.Studio) -metadata date=$($this.Date) -c copy ".\encode\$($this.name)" | Out-Host
+    ffmpeg -hide_banner -i $this.FullName -metadata genre=$($this.Genre) -metadata artist=$($this.Actor) -metadata title=$($this.Title) -metadata album=$($this.Studio) -metadata date=$($this.Date) -c copy ".\encode\$($this.name)" | Out-Host
     Remove-Item $this.FullName
     Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
 }
 }
+
 Function Search-Video {
 param(
     #[parameter(Mandatory)]
@@ -138,6 +156,19 @@ process {
     [Video]::new((Get-ChildItem $Path))
 }
 }
+Function Invoke-ActorNameWizard {
+param ([switch]$Override)
+foreach ($File in (Get-ChildItem -File)) {
+    $video = Get-Video $File
+    $video
+    if ($video.actor -and (!$Override.IsPresent)) {Continue}
+    $Actor = Read-Host "Actor Name(s)"
+
+    if ([string]$Actor -eq "skip") {Continue}
+    add-videometadata $video -actor $Actor
+}
+}
+
 Function Set-VideoTitle {
 param(
     [parameter(Mandatory,ValueFromPipeline)]
@@ -159,11 +190,14 @@ param(
     [parameter(Mandatory,ValueFromPipeline)]
     $Path,
     [string]$Genre,
-    [string]$Title
+    [string]$Title,
+    [string]$Actor
 )
 Process {
     $video = [Video]::new((Get-ChildItem $Path))
     $video.Genre = $Genre
+    $video.Title = $Title
+    $video.Actor = $Actor
     if ($Title) {$video.Title = $Title}
     $video.WriteMetadata()
 }
@@ -172,19 +206,34 @@ Function Add-VideoMetadata {
 param(
     [parameter(Mandatory,ValueFromPipeline)]
     $Path,
-    [parameter(Mandatory)]
-    [string]$Genre
+    [string]$Genre,
+    [string]$Title,
+    [string]$Actor
 )
 process {
+    if (!$Genre -and !$Title -and !$Actor) {return}    ## check for empty parameters
     $video = [Video]::new((Get-ChildItem $Path))
+
     [array]$oldGenre = $video.Genre.Trim() -split ','
     [array]$newGenre = $Genre.Trim() -split ','
     $newGenre = ([System.Linq.Enumerable]::Distinct([string[]]$($newGenre + $oldGenre)) -join ',') -replace '(^,)?(,$)?','' ## -replace prevents extra commas
-    if ($newGenre -eq $($oldGenre -join ',')) {
-        Write-Warning "The command completed successfully, but no changes were made to $($video.Name)"
-        return
-    }
+    #if ($newGenre -eq $($oldGenre -join ',')) {
+    #    Write-Warning "The command completed successfully, but no changes were made to $($video.Name)"
+    #    return
+    #}
     $video.Genre = $newGenre
+
+    [array]$oldActor = $video.Actor.Trim() -split ','
+    [array]$newActor = $Actor.Trim() -split ','
+    $newActor = ([System.Linq.Enumerable]::Distinct([string[]]$($newActor + $oldActor)) -join ',') -replace '(^,)?(,$)?','' ## -replace prevents extra commas
+
+    ## this check needs to be moved to WriteMetadata() method
+
+    #if ($newActor -eq $($oldActor -join ',')) {
+    #    Write-Warning "The command completed successfully, but no changes were made to $($video.Name)"
+    #    return
+    #}
+    $video.Actor = $newActor
     $video.WriteMetadata()
 }
 }
@@ -194,13 +243,14 @@ param(
     $Path,
     $Destination = "X:\Thumbs",
     [string] $SceneFilter = "0.4",
-    [string] $Grid = "4x4"
+    [string] $Grid = "4x4",
+    [string] $SS = "5"
 )
     $video = [Video]::new((Get-ChildItem $Path))
     #ffmpeg -ss 3 -i $video.FullName -vf "select=gt(scene\,0.5)" -frames:v 5 -vsync vfr "$Destination\$($video.Basename)%02d.jpg"
     #ffmpeg -ss 3 -i $video.FullName -vf "select=gt(scene\,0.4),fps=1/600" -frames:v 5 -vsync vfr "$Destination\$($video.Basename)%02d.jpg"
     #ffmpeg -i $video.FullName -vf "select=gt(scene\,0.25),scale=100:-1,tile=5x5" -frames:v 1 -qscale:v 3 "$Destination\$($video.Basename).jpg"
-    ffmpeg -i $video.FullName -vf "select=gt(scene\,$SceneFilter),scale=500:-1,tile=$Grid" -frames:v 1 -qscale:v 3 "$Destination\$($video.Basename).jpg"
+    ffmpeg -ss $SS -i $video.FullName -vf "select=gt(scene\,$SceneFilter),scale=500:-1,tile=$Grid" -frames:v 1 -qscale:v 3 "$Destination\$($video.Basename).jpg"
 }
 #endregion
 
