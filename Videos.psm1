@@ -120,12 +120,17 @@ Video([String]$Path) {
 # WriteMetadata()
 #
 # Write video metadata to object. Requires FFMPEG.
-# Todo: create check to prevent writing metadata even if nothing has changed
+# Todo: encode folder appears at current path, not in parent folder
 
 [void] WriteMetadata() {
-    if (!(Test-Path .\encode)) {[void](mkdir encode)}
-    #$video = [Video]::new((Get-ChildItem $Path))
+    ## test for object equality
+    $referenceObject = Get-Video $this.FullName
+    if (!(Compare-Object $this.psobject.properties.value $referenceObject.psobject.properties.value)) {
+        Write-Warning "The command completed successfully, but no changes were made to `'$($this.Name)`'"
+        return
+    }
 
+    if (!(Test-Path .\encode)) {[void](mkdir encode)}
     ffmpeg -hide_banner -i $this.FullName -metadata genre=$($this.Genre) -metadata artist=$($this.Actor) -metadata title=$($this.Title) -metadata album=$($this.Studio) -metadata date=$($this.Date) -c copy ".\encode\$($this.name)" | Out-Host
     Remove-Item $this.FullName
     Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
@@ -166,6 +171,18 @@ foreach ($File in (Get-ChildItem -File)) {
 
     if ([string]$Actor -eq "skip") {Continue}
     add-videometadata $video -actor $Actor
+}
+}
+Function Invoke-TitleWizard {
+param ([switch]$Override)
+foreach ($File in (Get-ChildItem -Recurse -File *.mp4)) {
+    $video = Get-Video $File
+    $video
+    if ($video.Title -and (!$Override.IsPresent)) {Continue}
+    $Title = $video.basename
+
+    if ([string]$Title -eq "skip") {Continue}
+    add-videometadata $video -Title $Title
 }
 }
 
@@ -217,23 +234,14 @@ process {
     [array]$oldGenre = $video.Genre.Trim() -split ','
     [array]$newGenre = $Genre.Trim() -split ','
     $newGenre = ([System.Linq.Enumerable]::Distinct([string[]]$($newGenre + $oldGenre)) -join ',') -replace '(^,)?(,$)?','' ## -replace prevents extra commas
-    #if ($newGenre -eq $($oldGenre -join ',')) {
-    #    Write-Warning "The command completed successfully, but no changes were made to $($video.Name)"
-    #    return
-    #}
     $video.Genre = $newGenre
 
     [array]$oldActor = $video.Actor.Trim() -split ','
     [array]$newActor = $Actor.Trim() -split ','
     $newActor = ([System.Linq.Enumerable]::Distinct([string[]]$($newActor + $oldActor)) -join ',') -replace '(^,)?(,$)?','' ## -replace prevents extra commas
-
-    ## this check needs to be moved to WriteMetadata() method
-
-    #if ($newActor -eq $($oldActor -join ',')) {
-    #    Write-Warning "The command completed successfully, but no changes were made to $($video.Name)"
-    #    return
-    #}
     $video.Actor = $newActor
+
+    if ($Title){$video.Title = $Title}
     $video.WriteMetadata()
 }
 }
@@ -253,8 +261,6 @@ param(
     ffmpeg -ss $SS -i $video.FullName -vf "select=gt(scene\,$SceneFilter),scale=500:-1,tile=$Grid" -frames:v 1 -qscale:v 3 "$Destination\$($video.Basename).jpg"
 }
 #endregion
-
-
 
 #region Classless functions
 Function Import-Video {
