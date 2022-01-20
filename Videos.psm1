@@ -61,9 +61,19 @@ Class Video {
 [string]$Studio
 [string]$Actor
 [string]$Date
+[string]$Codec
+[string]$Height
+[string]$Bitrate
+[string]$Ratio
+[string]$FrameRate
+[string]$Duration
 
 Video([System.IO.FileInfo]$File) {
-    $foo = ffprobe -v error -hide_banner -of default=noprint_wrappers=0 -print_format json -select_streams v:0 -show_format $File | ConvertFrom-Json
+    $foo = ffprobe.exe -v error -hide_banner -show_streams -show_format -select_streams v:0 -print_format json $File | ConvertFrom-JSON
+    if (!$foo) {
+        #throw new ArgumentException("Color must be 'green' or 'yellow'", "color")
+        throw [System.ArgumentException]::new("Input must be a video file","File")
+    }
     $this.Basename = $File.BaseName
     $this.Name = $File.Name
     $this.FullName = $File.FullName
@@ -74,10 +84,20 @@ Video([System.IO.FileInfo]$File) {
     $this.Studio = $foo.format.tags.album
     $this.Actor = $foo.format.tags.artist
     $this.Date = $foo.format.tags.date
+    $this.Codec = $foo.streams.codec_name
+    $this.Height = $foo.streams.height
+    $this.Bitrate = $foo.streams.bit_rate
+    $this.Ratio = [system.math]::round($foo.streams.bit_rate/($foo.streams.height*$foo.streams.width),2)
+    $this.FrameRate = [system.math]::Round([System.Data.DataTable]::new().Compute($foo.streams.avg_frame_rate,""),2)
+    $this.Duration = $foo.format.duration
 }
 Video([String]$Path) {
     $File = Get-Item $Path
-    $foo = ffprobe -v error -hide_banner -of default=noprint_wrappers=0 -print_format json -select_streams v:0 -show_format $File | ConvertFrom-Json
+    $foo = ffprobe.exe -v error -hide_banner -show_streams -show_format -select_streams v:0 -print_format json $File | ConvertFrom-JSON
+    if (!$foo) {
+        #throw new ArgumentException("Color must be 'green' or 'yellow'", "color")
+        throw [System.ArgumentException]::new("Input must be a video file","File")
+    }
     $this.Basename = $File.BaseName
     $this.Name = $File.Name
     $this.FullName = $File.FullName
@@ -88,11 +108,27 @@ Video([String]$Path) {
     $this.Studio = $foo.format.tags.album
     $this.Actor = $foo.format.tags.artist
     $this.Date = $foo.format.tags.date
+    $this.Codec = $foo.streams.codec_name
+    $this.Height = $foo.streams.height
+    $this.Bitrate = $foo.streams.bit_rate
+    $this.FrameRate = [system.math]::Round([System.Data.DataTable]::new().Compute($foo.streams.avg_frame_rate,""),2)
+    $this.Duration = $foo.format.duration
 }
 
 [void] EncodeH265(){
+    ## Settled on hevc_nvenc for speed/quality/compression.  Test sample at q27 had vamf score of 98 and compression ratio of ~.5.
+
+    if ($this.Codec -match 'hevc') {Write-Warning "`'$($this.name)`' is already encoded in H.265" ; return}
     if (!(Test-Path .\encode)) {[void](mkdir encode)}
-    ffmpeg -i $this.FullName -c:v hevc -preset veryslow ".\encode\$($this.name)" | Out-Host
+    #if ($this.Height -gt 2160){  ## Tune option for 4K video
+    #    ffmpeg -i $this.FullName -c:v libx265 -preset slow -tune fastdecode ".\encode\$($this.name)" | Out-Host
+    #}
+    #else {
+        #ffmpeg -i $this.FullName -c:v hevc_nvenc -preset p7 ".\encode\$($this.name)" | Out-Host
+        #ffmpeg -i $this.FullName -c:v libx265 -preset slow ".\encode\$($this.name)" | Out-Host
+        ffmpeg -i $this.FullName -c:v hevc_nvenc -rc vbr -cq 27 -qmin 27 -qmax 27 -profile:v main -pix_fmt p010le -b:v 0K ".\encode\$($this.name)" | Out-Host
+    #}    
+    
     Remove-Item $this.FullName
     Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
 }
@@ -134,6 +170,16 @@ Video([String]$Path) {
     ffmpeg -hide_banner -i $this.FullName -metadata genre=$($this.Genre) -metadata artist=$($this.Actor) -metadata title=$($this.Title) -metadata album=$($this.Studio) -metadata date=$($this.Date) -c copy ".\encode\$($this.name)" | Out-Host
     Remove-Item $this.FullName
     Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
+}
+}
+
+Function ConvertTo-H265 {
+param(
+    [parameter(Mandatory,ValueFromPipeline)]
+    $Path
+)
+process{
+    [Video]::new((Get-ChildItem $Path)).EncodeH265()
 }
 }
 
@@ -250,15 +296,9 @@ param(
     [parameter(Mandatory,ValueFromPipeline)]
     $Path,
     $Destination = "X:\Thumbs",
-    [string] $SceneFilter = "0.4",
-    [string] $Grid = "4x4",
-    [string] $SS = "5"
 )
     $video = [Video]::new((Get-ChildItem $Path))
-    #ffmpeg -ss 3 -i $video.FullName -vf "select=gt(scene\,0.5)" -frames:v 5 -vsync vfr "$Destination\$($video.Basename)%02d.jpg"
-    #ffmpeg -ss 3 -i $video.FullName -vf "select=gt(scene\,0.4),fps=1/600" -frames:v 5 -vsync vfr "$Destination\$($video.Basename)%02d.jpg"
-    #ffmpeg -i $video.FullName -vf "select=gt(scene\,0.25),scale=100:-1,tile=5x5" -frames:v 1 -qscale:v 3 "$Destination\$($video.Basename).jpg"
-    ffmpeg -ss $SS -i $video.FullName -vf "select=gt(scene\,$SceneFilter),scale=500:-1,tile=$Grid" -frames:v 1 -qscale:v 3 "$Destination\$($video.Basename).jpg"
+    ffmpeg -i $video.FullName -f image2 -vf fps=1/$([System.Math]::Round($video.Duration/16)),scale=500:-1,tile=4x4 -frames:v 1 "$Destination\$($video.Basename).jpg"
 }
 #endregion
 
