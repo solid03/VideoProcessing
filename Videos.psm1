@@ -25,7 +25,8 @@ Class Archive {
         catch {throw $_}
     }
 }
-
+## This function name conflicts with actual Expand-Archive commandlet
+<#
 Function Expand-Archive {
 param(
     [parameter(Mandatory,ValueFromPipeline)]
@@ -47,6 +48,7 @@ Process {
     #[archive]::new($archive).Extract()    Calling 7z.exe from method doesn't show percent complete
 }
 }
+#>
 
 #endregion
 #region Video
@@ -67,6 +69,7 @@ Class Video {
 [string]$Ratio
 [string]$FrameRate
 [string]$Duration
+[string]$Comment
 
 Video([System.IO.FileInfo]$File) {
     $foo = ffprobe.exe -v error -hide_banner -show_streams -show_format -select_streams v:0 -print_format json $File | ConvertFrom-JSON
@@ -81,7 +84,8 @@ Video([System.IO.FileInfo]$File) {
     $this.Directory = $File.Directory
     $this.Title = $foo.format.tags.title
     $this.Genre = $foo.format.tags.genre
-    $this.Studio = $foo.format.tags.album
+    #$this.Studio = $foo.format.tags.album
+    $this.Studio = $foo.format.tags.copyright
     $this.Actor = $foo.format.tags.artist
     $this.Date = $foo.format.tags.date
     $this.Codec = $foo.streams.codec_name
@@ -90,6 +94,7 @@ Video([System.IO.FileInfo]$File) {
     $this.Ratio = [system.math]::round($foo.streams.bit_rate/($foo.streams.height*$foo.streams.width),2)
     $this.FrameRate = [system.math]::Round([System.Data.DataTable]::new().Compute($foo.streams.avg_frame_rate,""),2)
     $this.Duration = $foo.format.duration
+    $this.Comment = $foo.format.tags.comment
 }
 Video([String]$Path) {
     $File = Get-Item $Path
@@ -105,7 +110,8 @@ Video([String]$Path) {
     $this.Directory = $File.Directory
     $this.Title = $foo.format.tags.title
     $this.Genre = $foo.format.tags.genre
-    $this.Studio = $foo.format.tags.album
+    #$this.Studio = $foo.format.tags.album
+    $this.Studio = $foo.format.tags.copyright
     $this.Actor = $foo.format.tags.artist
     $this.Date = $foo.format.tags.date
     $this.Codec = $foo.streams.codec_name
@@ -113,6 +119,7 @@ Video([String]$Path) {
     $this.Bitrate = $foo.streams.bit_rate
     $this.FrameRate = [system.math]::Round([System.Data.DataTable]::new().Compute($foo.streams.avg_frame_rate,""),2)
     $this.Duration = $foo.format.duration
+    $this.Comment = $foo.format.tags.comment
 }
 
 [void] EncodeH265(){
@@ -138,13 +145,20 @@ Video([String]$Path) {
 # Parse video information/metadata from file name
 #
 [Hashtable] ParseName() {
-    $withEpisodeString = '(?<studio>\w+)\.(?<episode>\w{5})\.(?<title>.*)'
-    $maybeDateString = '(?<studio>\w+)\.(?<date>(?<year>\d\d)\.(?<month>\d\d)\.(?<day>\d\d))?\.?(?<title>.*)'
-    $narcosString = 'narcos-(?<studio>gx)-(?<date>(?<year>\d\d)-(?<month>\d\d)-(?<day>\d\d))-(?<title>.*)-\d+p'
-            
+    $narcosString = 'narcos-(?<studio>\w+)-(?<date>(?<year>\d\d)-(?<month>\d\d)-(?<day>\d\d))-(?<title>.*)-\d+p'
+    $withEpisodeString = '(?<studio>\w+)\W(?<episode>\w{5})\W(?<title>.*)'
+    $maybeDateString = '(?<studio>\w+)\W(?<date>(?<year>\d\d)\W(?<month>\d\d)\W(?<day>\d\d))?\.?(?<title>.*)'
+    
     $this.Basename -match $withEpisodeString
     $this.Basename -match $maybeDateString
     $this.Basename -match $narcosString
+
+    ## Using Regex switch changes $matches
+<#  
+    switch -Wildcard ($matches.studio) {
+        Add cases to this statement to change the studio name before it is written to the file
+    }
+#>
         
     return $Matches
 }
@@ -152,6 +166,10 @@ Video([String]$Path) {
 [string] ToString() {
     return $this.FullName
 }
+
+#####Clear metadata
+#ffmpeg -y -i "test.mkv" -c copy -map_metadata -1 -metadata title="My Title" -metadata creation_time=2016-09-20T21:30:00 -map_chapters -1 "test.mkv"
+
 
 # WriteMetadata()
 #
@@ -167,10 +185,38 @@ Video([String]$Path) {
     }
 
     if (!(Test-Path .\encode)) {[void](mkdir encode)}
-    ffmpeg -hide_banner -i $this.FullName -metadata genre=$($this.Genre) -metadata artist=$($this.Actor) -metadata title=$($this.Title) -metadata album=$($this.Studio) -metadata date=$($this.Date) -c copy ".\encode\$($this.name)" | Out-Host
+    ffmpeg -hide_banner -i $this.FullName -metadata comment=$($this.Comment) -metadata genre=$($this.Genre) -metadata artist=$($this.Actor) -metadata album="" -metadata title=$($this.Title) -metadata copyright=$($this.Studio) -metadata date=$($this.Date) -c copy ".\encode\$($this.name)" | Out-Host
     Remove-Item $this.FullName
     Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
 }
+[void] WriteMetadataAndEncode() {
+    ## test for object equality
+    $referenceObject = Get-Video $this.FullName
+    if (!(Compare-Object $this.psobject.properties.value $referenceObject.psobject.properties.value)) {
+        Write-Warning "The command completed successfully, but no changes were made to `'$($this.Name)`'"
+        $this.EncodeH265()
+        return
+    }
+    if ($this.Codec -match 'hevc') {
+        Write-Warning "`'$($this.name)`' is already encoded in H.265"
+        $this.WriteMetadata()
+        return
+    }
+
+    if (!(Test-Path .\encode)) {[void](mkdir encode)}
+    ffmpeg -hide_banner -i $this.FullName -metadata comment=$($this.Comment) -metadata genre=$($this.Genre) -metadata artist=$($this.Actor) -metadata album="" -metadata title=$($this.Title) -metadata copyright=$($this.Studio) -metadata date=$($this.Date) -c:v hevc_nvenc -rc vbr -cq 27 -qmin 27 -qmax 27 -profile:v main -pix_fmt p010le -b:v 0K ".\encode\$($this.name)" | Out-Host
+    Remove-Item $this.FullName
+    Move-Item ".\encode\$($this.Name)" -Destination $this.Directory
+}
+}
+Function New-VideoSample {
+param(
+    [parameter(Mandatory,ValueFromPipeline)]
+    $Path
+)
+    $video = [Video]::new((Get-ChildItem $Path))
+    ffmpeg.exe -ss $([System.Random]::new().Next($($video.duration - 60))) -i $video.FullName -t 60 -c copy "$($video.Directory)\sample.mp4"
+
 }
 
 Function ConvertTo-H265 {
@@ -208,17 +254,21 @@ process {
 }
 }
 Function Invoke-ActorNameWizard {
-param ([switch]$Override)
-foreach ($File in (Get-ChildItem -File)) {
+param (
+    [switch]$Override,
+    [switch]$Recurse
+)
+foreach ($File in (Get-ChildItem *.mp4 -Recurse:$Recurse)) {
     $video = Get-Video $File
-    $video
     if ($video.actor -and (!$Override.IsPresent)) {Continue}
+    $video
     $Actor = Read-Host "Actor Name(s)"
 
     if ([string]$Actor -eq "skip") {Continue}
     add-videometadata $video -actor $Actor
 }
 }
+<#
 Function Invoke-TitleWizard {
 param ([switch]$Override)
 foreach ($File in (Get-ChildItem -Recurse -File *.mp4)) {
@@ -231,21 +281,66 @@ foreach ($File in (Get-ChildItem -Recurse -File *.mp4)) {
     add-videometadata $video -Title $Title
 }
 }
+#>
+
+Function Invoke-VideoChapterWizard {
+param(
+    [parameter(Mandatory)] $Path
+)
+    $video = [Video]::new((Get-ChildItem $Path))
+    $oldMetadata = ffmpeg -hide_banner -v error -i $video.FullName -f ffmetadata -
+    $moreChapters = $true
+
+    do {
+        $startTimeStamp = Read-Host "Chapter start timestamp"
+        if ($startTimeStamp -ne "0") {
+            $startTimeStamp -match '(?<hours>\d+)\W(?<minutes>\d+)\W(?<seconds>)\d+' | Out-Null
+            $startTimeStamp = (New-TimeSpan -Hours $Matches.hours -Minutes $Matches.minutes -Seconds $Matches.seconds).TotalSeconds
+        }  
+        $endTimeStamp = Read-Host "Chapter end timestamp"
+        if ($endTimeStamp -match 'end') {
+            $endTimeStamp = [System.Math]::Floor($video.Duration)
+            $moreChapters = $false
+        } else {
+            $endTimeStamp -match '(?<hours>\d+)\W(?<minutes>\d+)\W(?<seconds>)\d+' | Out-Null
+            $endTimeStamp = (New-TimeSpan -Hours $Matches.hours -Minutes $Matches.minutes -Seconds $Matches.seconds).TotalSeconds
+        }
+        $chapterTitle = Read-Host "Chapter Title"
+
+
+        $oldMetadata += `
+"[CHAPTER]
+TIMEBASE=1/1
+START=$startTimeStamp
+END=$endTimeStamp
+title=$chapterTitle"
+    } while ($moreChapters)
+
+    Set-Content $env:TEMP\chapterwiz.txt -Value $oldMetadata
+
+    if (!(Test-Path .\encode)) {[void](mkdir encode)}
+    ffmpeg -i $video.FullName -i $env:TEMP\chapterwiz.txt -map_metadata 1 -codec copy ".\encode\$($video.Name)"
+    Remove-Item $video.FullName
+    Move-Item ".\encode\$($video.Name)" -Destination ".\"
+}
 
 Function Set-VideoTitle {
 param(
     [parameter(Mandatory,ValueFromPipeline)]
-    $Path
+    $Path,
+    [switch]$EncodeToH265
 )
 Process {
     $video = [Video]::new((Get-ChildItem $Path))
     $newName = [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ToTitleCase($($video.ParseName().title -replace '\W',' '))
     $video.Title = $newName
-    $video.studio = [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ToTitleCase($video.parsename().studio)
+    #$video.studio = [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ToTitleCase($video.parsename().studio)
+    $video.studio = $video.parsename().studio
     if ($video.parsename().date) {
         $video.date = "$($video.parsename().month).$($video.parsename().day).$($video.parsename().year)"
     }
-    $video.WriteMetadata()
+    if ($EncodeToH265) {$video.WriteMetadataAndEncode()}
+    else {$video.WriteMetadata()}
 }
 }
 Function Set-VideoMetadata {
@@ -254,14 +349,17 @@ param(
     $Path,
     [string]$Genre,
     [string]$Title,
-    [string]$Actor
+    [string]$Actor,
+    [string]$Studio,
+    [string]$Comment
 )
 Process {
     $video = [Video]::new((Get-ChildItem $Path))
     $video.Genre = $Genre
     $video.Title = $Title
     $video.Actor = $Actor
-    if ($Title) {$video.Title = $Title}
+    $video.Studio = $Studio
+    $video.Comment = $Comment
     $video.WriteMetadata()
 }
 }
@@ -295,24 +393,123 @@ Function Get-VideoScreenshots {
 param(
     [parameter(Mandatory,ValueFromPipeline)]
     $Path,
-    $Destination = "X:\Thumbs",
+    $Destination = "X:\Thumbs"
 )
+process {
     $video = [Video]::new((Get-ChildItem $Path))
     ffmpeg -i $video.FullName -f image2 -vf fps=1/$([System.Math]::Round($video.Duration/16)),scale=500:-1,tile=4x4 -frames:v 1 "$Destination\$($video.Basename).jpg"
 }
+}
+
+<#
+Function Unfuck-VideoMetadata {
+param (    
+    [parameter(Mandatory,ValueFromPipeline)]
+    $Path
+    #[parameter(Mandatory)]
+    #[System.String] $Studio
+)
+process {
+    $video = Get-Video $Path
+    #$video.Studio = $Studio
+    if ($video.studio) {
+        Write-Warning "The command completed successfully, but no changes were made to `'$($video.Name)`'"
+        return
+    }
+    $foo = ffprobe.exe -v error -hide_banner -show_streams -show_format -select_streams v:0 -print_format json $Path | ConvertFrom-JSON    
+    $video.studio = $foo.format.tags.album
+    $video.writemetadata()
+}
+}
+#>
+
 #endregion
 
+
 #region Classless functions
+Function Invoke-DVDWizard {
+param(
+    [parameter(Mandatory,ValueFromPipeline)] $File,
+    [parameter(Mandatory)] [string] $URI,
+    [parameter()] [string] $CoverPhotoURI
+)
+    Function Parse-DVDMetadata {
+    param (
+        [parameter(Mandatory)] [string] $URI
+    )
+        $webResponse = Invoke-WebRequest $URI
+
+        $hash = [ordered] @{
+            title = ($webResponse.AllElements | where {$_.class -eq 'spacing-bottom'}).innerText
+            studio = ($webResponse.AllElements | where {$_.class -eq 'studio'}).innerText
+            actor = (($webResponse.AllElements | where {$_.class -eq 'boxcover girl'}).innerText -replace "`r`n"," ").trim() -join ","
+            comment = $URI
+        }
+
+        New-Object psobject -Property $hash
+    }
+    $File = Get-ChildItem $File
+
+    if (!(Test-Path $file.BaseName)) {
+        $newHome = New-Item -ItemType Directory -Name $File.BaseName
+    } else {
+        $newHome = Get-ChildItem -Directory $File.BaseName
+    }
+
+    if ($CoverPhotoURI) {
+        Invoke-WebRequest -Uri $CoverPhotoURI -OutFile "$newHome\$($file.BaseName).jpg"
+    }
+
+    $metadata = Parse-DVDMetadata -URI $URI
+    Set-VideoMetadata $File -Title $metadata.Title -Genre DVD -Studio $metadata.studio -Actor $metadata.Actor -Comment $metadata.comment
+    Move-Item $File.FullName -Destination $newHome
+}
+
+
+
 Function Import-Video {
 param(
-    [parameter(Mandatory)]
-    [string]$URI,
-    $Archive
+    [parameter(Mandatory)] [string] $URI,
+    [string] $Archive
 )
     if ($Archive){
+        if (!(Test-Path $Archive)) {New-Item -Type File $Archive}
         $archiveFile = Get-ChildItem $Archive
         yt-dlp.exe --download-archive $archiveFile.FullName -o "%(title)s.%(ext)s" $URI
     }
     else {yt-dlp.exe -o "%(title)s.%(ext)s" $URI}
+}
+Function Import-Song {
+param(
+    [parameter(Mandatory)] [string] $URI
+)
+    yt-dlp.exe -x --audio-format mp3 -o "%(title)s.%(ext)s" $URI
+}
+Function Split-Photo {
+param(
+    [parameter(Mandatory,Position=0)][string]$Path,
+    [switch]$Left,
+    [switch]$DVD
+)
+    if (!(Test-Path .\encode)) {[void](mkdir encode)}
+    try{$photo = Get-ChildItem $Path -ErrorAction Stop}
+    catch {$_}
+    if ($photo.Extension -notmatch '(jpg|png)') {Write-Error "Unable to crop $($photo.Name).  It is not an image file." ; return}
+    
+    if (!$DVD){
+        if ($Left) {$filter = "crop=(iw/2):(ih):0:0"}
+        else {$filter = "crop=(iw/2):(ih):(iw/2):0"}
+    }
+    else {
+        if ($Left) {$filter = "crop=(iw*.47445):(ih):0:0"}
+        else {$filter = "crop=(iw*.47445):(ih):(iw*(1-.47445)):0"}
+    }
+
+    ffmpeg -i $photo.FullName -vf $filter ".\encode\$($photo.name)" | Out-Host
+    
+    Remove-Item $photo.FullName
+    Move-Item ".\encode\$($photo.Name)" -Destination $photo.Directory
+
+
 }
 #endregion
